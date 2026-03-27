@@ -28,7 +28,7 @@ No original Claude extension code is modified. Only additional files are injecte
 
 1. **Clone this repo**
    ```bash
-   git clone https://github.com/YOUR_USERNAME/claude-arc-patch.git
+   git clone https://github.com/quardianwolf/claude-arc-patch
    cd claude-arc-patch
    ```
 
