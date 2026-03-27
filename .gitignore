@@ -1,0 +1,20 @@
+# Patched extension output (contains copied Chrome extension files)
+claude-arc-patched/
+claude-arc-patched.zip
+
+# Claude Code
+.claude/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor files
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+
+# Node
+node_modules/
