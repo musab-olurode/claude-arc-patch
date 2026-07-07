@@ -27,45 +27,46 @@ fail()  { echo -e "${RED}[FAIL]${NC} $1"; exit 1; }
 # ── Find Claude Extension ───────────────────────────────────────
 
 find_claude_extension() {
-  local search_dirs=()
+  shopt -s nullglob
 
+  # Browser profile roots. Only the profile dir and version dir are globbed (the
+  # unquoted *); the space-containing parts stay quoted so paths such as
+  # "Application Support" / "User Data" are not split on their spaces.
+  local roots=()
   if [[ "$OSTYPE" == "darwin"* ]]; then
-    # macOS - Chrome and Arc extension paths
-    search_dirs+=(
-      "$HOME/Library/Application Support/Google/Chrome/Default/Extensions"
-      "$HOME/Library/Application Support/Google/Chrome/Profile */Extensions"
-      "$HOME/Library/Application Support/Arc/User Data/Default/Extensions"
-      "$HOME/Library/Application Support/Arc/User Data/Profile */Extensions"
+    roots+=(
+      "$HOME/Library/Application Support/Google/Chrome"
+      "$HOME/Library/Application Support/Arc/User Data"
     )
   elif [[ "$OSTYPE" == "linux-gnu"* ]]; then
-    search_dirs+=(
-      "$HOME/.config/google-chrome/Default/Extensions"
-      "$HOME/.config/google-chrome/Profile */Extensions"
+    roots+=(
+      "$HOME/.config/google-chrome"
+      "$HOME/.config/chromium"
     )
   fi
 
   # Claude extension known IDs
   local claude_ids=("jlgadfahkiakjhceomgpemiabkpgnlho" "cpklelfgbalgamlgfhikjfneldeeilcg" "fcoeoabgfenejglbffodgkkbkcdhcgfn")
 
-  for base_dir_pattern in "${search_dirs[@]}"; do
-    for base_dir in $base_dir_pattern; do
-      [ -d "$base_dir" ] || continue
-      for ext_id in "${claude_ids[@]}"; do
-        local ext_path="$base_dir/$ext_id"
-        if [ -d "$ext_path" ]; then
-          # Get latest version directory
-          local latest_ver
-          latest_ver=$(ls -1 "$ext_path" | sort -V | tail -1)
-          if [ -n "$latest_ver" ] && [ -f "$ext_path/$latest_ver/manifest.json" ]; then
-            echo "$ext_path/$latest_ver"
-            return 0
-          fi
+  # Collect every installed version dir across profiles, then keep the highest version.
+  local best=""
+  for root in "${roots[@]}"; do
+    for ext_id in "${claude_ids[@]}"; do
+      for ver_dir in "$root"/*/Extensions/"$ext_id"/*/; do
+        [ -f "${ver_dir}manifest.json" ] || continue
+        local cand="${ver_dir%/}"
+        if [ -z "$best" ]; then
+          best="$cand"
+        elif [ "$(printf '%s\n%s\n' "${best##*/}" "${cand##*/}" | sort -V | tail -1)" = "${cand##*/}" ]; then
+          best="$cand"
         fi
       done
     done
   done
 
-  return 1
+  [ -n "$best" ] || return 1
+  echo "$best"
+  return 0
 }
 
 # ── Main ─────────────────────────────────────────────────────────
@@ -130,11 +131,13 @@ info "Adding sw-patch.js..."
 cp "$SW_PATCH_JS" "$OUTPUT_DIR/sw-patch.js"
 ok "sw-patch.js added"
 
-# ── Extract inline script from sidepanel.html ────────────────────
+# ── Patch sidepanel.html ─────────────────────────────────────────
+# Two jobs: (1) if the extension still ships an inline theme <script>, move it to an
+# external file (Manifest V3 CSP forbids inline scripts); (2) inject arc-tabs-patch.js
+# so chrome.tabs.query is patched before the sidepanel bundle runs. Job 2 must NOT
+# depend on job 1 — newer versions dropped the inline theme script entirely.
 
-info "Extracting inline script from sidepanel.html..."
-
-# Create theme-init.js from the inline script
+info "Preparing theme-init.js (used only if this version ships an inline theme script)..."
 cat > "$OUTPUT_DIR/theme-init.js" << 'THEMEJS'
 (function () {
   const isDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
@@ -150,45 +153,48 @@ cat > "$OUTPUT_DIR/theme-init.js" << 'THEMEJS'
 })();
 THEMEJS
 
-# Replace inline script tag with external script reference
-OUTPUT_DIR="$OUTPUT_DIR" python3 -c "
-import re, os
-path = os.path.join(os.environ['OUTPUT_DIR'], 'sidepanel.html')
-with open(path, 'r') as f:
-    html = f.read()
-html = re.sub(
-    r'<script>\s*//\s*Set initial theme.*?</script>',
-    '<script src=\"/theme-init.js\"></script>',
-    html,
-    flags=re.DOTALL
-)
-with open(path, 'w') as f:
-    f.write(html)
-print('OK')
-"
-ok "Inline script extracted to theme-init.js"
-
-# ── Add arc-tabs-patch.js to sidepanel.html ──────────────────────
-
 info "Adding arc-tabs-patch.js..."
 cp "$ARC_TABS_PATCH_JS" "$OUTPUT_DIR/arc-tabs-patch.js"
 
-# Insert arc-tabs-patch.js before the main sidepanel script
-OUTPUT_DIR="$OUTPUT_DIR" python3 -c "
-import os
-path = os.path.join(os.environ['OUTPUT_DIR'], 'sidepanel.html')
-with open(path, 'r') as f:
+info "Patching sidepanel.html..."
+OUTPUT_DIR="$OUTPUT_DIR" python3 << 'PYEOF'
+import re, os
+
+out = os.environ["OUTPUT_DIR"]
+path = os.path.join(out, "sidepanel.html")
+with open(path) as f:
     html = f.read()
-if 'arc-tabs-patch.js' not in html:
-    html = html.replace(
-        '<script src=\"/theme-init.js\"></script>',
-        '<script src=\"/theme-init.js\"></script>\n    <script src=\"/arc-tabs-patch.js\"></script>'
-    )
-    with open(path, 'w') as f:
-        f.write(html)
-print('OK')
-"
-ok "arc-tabs-patch.js added to sidepanel.html"
+
+# (1) Extract inline theme script to an external file if present (older versions).
+m = re.search(r"<script>\s*//\s*Set initial theme.*?</script>", html, flags=re.DOTALL)
+if m:
+    html = html.replace(m.group(0), '<script src="/theme-init.js"></script>')
+else:
+    # Newer versions theme inside the bundle; drop the unused generated file.
+    tj = os.path.join(out, "theme-init.js")
+    if os.path.exists(tj):
+        os.remove(tj)
+
+# (2) Inject arc-tabs-patch.js before the first <script> so chrome.tabs.query is
+#     patched before the sidepanel bundle runs. A classic script executes before the
+#     deferred module bundle regardless of position. Anchored on <script>, not on the
+#     theme tag, so it survives future markup changes. Idempotent.
+if "arc-tabs-patch.js" not in html:
+    tag = '<script src="/arc-tabs-patch.js"></script>\n    '
+    idx = html.find("<script")
+    if idx != -1:
+        html = html[:idx] + tag + html[idx:]
+    else:
+        html = html.replace("</head>", "    " + tag + "</head>")
+
+with open(path, "w") as f:
+    f.write(html)
+
+# Fail loudly if the critical patch did not land — never report success silently.
+assert "arc-tabs-patch.js" in html, "FAILED to inject arc-tabs-patch.js into sidepanel.html"
+print("OK")
+PYEOF
+ok "sidepanel.html patched (arc-tabs-patch.js injected)"
 
 # ── Patch manifest.json ─────────────────────────────────────────
 
