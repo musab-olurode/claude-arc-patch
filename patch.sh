@@ -11,6 +11,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 FLOATING_PANEL_JS="$SCRIPT_DIR/floating-panel.js"
 SW_PATCH_JS="$SCRIPT_DIR/sw-patch.js"
 ARC_TABS_PATCH_JS="$SCRIPT_DIR/arc-tabs-patch.js"
+ARC_TABGROUPS_SHIM_JS="$SCRIPT_DIR/arc-tabgroups-shim.js"
 
 # ── Colors ───────────────────────────────────────────────────────
 RED='\033[0;31m'
@@ -80,6 +81,7 @@ echo ""
 [ -f "$FLOATING_PANEL_JS" ] || fail "floating-panel.js not found in $SCRIPT_DIR"
 [ -f "$SW_PATCH_JS" ] || fail "sw-patch.js not found in $SCRIPT_DIR"
 [ -f "$ARC_TABS_PATCH_JS" ] || fail "arc-tabs-patch.js not found in $SCRIPT_DIR"
+[ -f "$ARC_TABGROUPS_SHIM_JS" ] || fail "arc-tabgroups-shim.js not found in $SCRIPT_DIR"
 
 # Find or accept source path
 SOURCE_DIR=""
@@ -129,6 +131,12 @@ ok "floating-panel.js added"
 info "Adding sw-patch.js..."
 cp "$SW_PATCH_JS" "$OUTPUT_DIR/sw-patch.js"
 ok "sw-patch.js added"
+
+# Copy tab groups shim (emulates the Chrome Tab Groups API, which Arc exposes
+# but never resolves — see README "How It Works")
+info "Adding arc-tabgroups-shim.js..."
+cp "$ARC_TABGROUPS_SHIM_JS" "$OUTPUT_DIR/arc-tabgroups-shim.js"
+ok "arc-tabgroups-shim.js added"
 
 # ── Extract inline script from sidepanel.html ────────────────────
 
@@ -254,6 +262,8 @@ if bg.get("service_worker"):
     with open(loader_path, "w") as f:
         f.write(f'// Patch sidePanel API BEFORE loading original service worker\n')
         f.write(f'import "./sw-patch.js";\n')
+        f.write(f'// Emulate the Chrome Tab Groups API (Arc exposes it but it hangs)\n')
+        f.write(f'import "./arc-tabgroups-shim.js";\n')
         f.write(f'import "./{original_sw}";\n')
 
 # Remove side_panel key if present (not supported in Arc)

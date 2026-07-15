@@ -1,0 +1,247 @@
+// ──────────────────────────────────────────────────────────────────
+// Arc Tab Groups Shim
+//
+// Arc exposes the Chrome Tab Groups API surface (chrome.tabGroups is an
+// object, chrome.tabs.group is a function, TAB_GROUP_ID_NONE === -1), BUT the
+// calls never resolve: chrome.tabs.group() hangs forever. The Claude
+// extension's automation layer ("MCP tab group") funnels every
+// tabs_context_mcp / navigate through createGroup() -> chrome.tabs.group(), so
+// the MCP tool never resolves and the request times out.
+//
+// Empirically (service-worker console):
+//   STEP created 1204885098
+//   STEP ERR TIMEOUT tabs.group      <-- chrome.tabs.group() never returns
+//
+// This shim replaces the tab-group methods in place with a fully in-memory
+// emulation keyed by synthetic group IDs. It tracks membership itself and
+// intercepts chrome.tabs.query({groupId}) / chrome.tabs.get() so the rest of
+// the extension keeps working unmodified. Visual grouping is cosmetic and Arc
+// doesn't render tab groups anyway, so emulation is sufficient. State is
+// mirrored to chrome.storage.session so it survives service-worker restarts.
+//
+// Loaded in the service worker (where mcpPermissions + the bridge websocket +
+// the tab-group manager run). Methods are overridden in place rather than
+// replacing chrome.tabGroups wholesale, which is more likely to succeed when
+// the native namespace object is present but non-configurable.
+// ──────────────────────────────────────────────────────────────────
+
+(function () {
+  "use strict";
+
+  if (typeof chrome === "undefined" || !chrome.tabs) return;
+  if (globalThis.__arcTabGroupsShimInstalled) return;
+
+  console.log("[Arc TabGroups Shim] installing in-memory tab group emulation");
+
+  var NONE = -1;
+  var nextGroupId = 900001;
+  // groupId -> { title, color, collapsed, windowId, tabIds:Set<number> }
+  var groups = new Map();
+  // tabId -> groupId
+  var tabToGroup = new Map();
+
+  var Color = {
+    grey: "grey", blue: "blue", red: "red", yellow: "yellow",
+    green: "green", pink: "pink", purple: "purple", cyan: "cyan", orange: "orange",
+    GREY: "grey", BLUE: "blue", RED: "red", YELLOW: "yellow",
+    GREEN: "green", PINK: "pink", PURPLE: "purple", CYAN: "cyan", ORANGE: "orange"
+  };
+
+  // ── Persistence (survive MV3 service-worker restarts) ───────────────
+  var STORE_KEY = "__arcEmulatedTabGroups";
+
+  function save() {
+    try {
+      var arr = [];
+      groups.forEach(function (g, id) {
+        arr.push({
+          id: id, title: g.title, color: g.color, collapsed: g.collapsed,
+          windowId: g.windowId, tabIds: Array.from(g.tabIds)
+        });
+      });
+      return chrome.storage.session.set({
+        __arcEmulatedTabGroups: { nextGroupId: nextGroupId, groups: arr }
+      });
+    } catch (e) { return Promise.resolve(); }
+  }
+
+  var ready = (async function load() {
+    try {
+      var d = await chrome.storage.session.get(STORE_KEY);
+      var saved = d && d[STORE_KEY];
+      if (saved) {
+        if (saved.nextGroupId) nextGroupId = saved.nextGroupId;
+        (saved.groups || []).forEach(function (g) {
+          groups.set(g.id, {
+            title: g.title, color: g.color, collapsed: g.collapsed,
+            windowId: g.windowId, tabIds: new Set(g.tabIds)
+          });
+          g.tabIds.forEach(function (t) { tabToGroup.set(t, g.id); });
+        });
+      }
+    } catch (e) { /* storage.session unavailable → in-memory only */ }
+  })();
+
+  function groupObj(id) {
+    var g = groups.get(id);
+    if (!g) throw new Error("No group with id " + id);
+    return {
+      id: id, title: g.title || "", color: g.color || "orange",
+      collapsed: !!g.collapsed, windowId: g.windowId
+    };
+  }
+
+  // ── Native references (used only for non-group tab operations) ──────
+  var nativeQuery = chrome.tabs.query.bind(chrome.tabs);
+  var nativeGet = chrome.tabs.get.bind(chrome.tabs);
+
+  // ── chrome.tabs.group ───────────────────────────────────────────────
+  chrome.tabs.group = async function (opts) {
+    await ready;
+    opts = opts || {};
+    var tabIds = [].concat(opts.tabIds || []);
+    var gid = opts.groupId;
+    var windowId = opts.createProperties && opts.createProperties.windowId;
+
+    if (gid == null || !groups.has(gid)) {
+      if (gid == null) gid = nextGroupId++;
+      if (windowId == null && tabIds.length) {
+        try { var t0 = await nativeGet(tabIds[0]); windowId = t0.windowId; } catch (e) {}
+      }
+      groups.set(gid, {
+        title: "", color: "orange", collapsed: false,
+        windowId: windowId, tabIds: new Set()
+      });
+    }
+    var g = groups.get(gid);
+    tabIds.forEach(function (t) { g.tabIds.add(t); tabToGroup.set(t, gid); });
+    await save();
+    return gid;
+  };
+
+  // ── chrome.tabs.ungroup ─────────────────────────────────────────────
+  chrome.tabs.ungroup = async function (tabIds) {
+    await ready;
+    [].concat(tabIds || []).forEach(function (t) {
+      var gid = tabToGroup.get(t);
+      if (gid != null) {
+        var g = groups.get(gid);
+        if (g) g.tabIds.delete(t);
+        tabToGroup.delete(t);
+      }
+    });
+    await save();
+  };
+
+  // ── chrome.tabs.query (intercept groupId filter, else pass through) ──
+  function doQuery(info) {
+    return (async function () {
+      await ready;
+      if (info && info.groupId != null) {
+        // Native Arc can't resolve group filters; serve from our tracking.
+        if (groups.has(info.groupId)) {
+          var g = groups.get(info.groupId);
+          var out = [];
+          var ids = Array.from(g.tabIds);
+          for (var i = 0; i < ids.length; i++) {
+            try { var t = await nativeGet(ids[i]); t.groupId = info.groupId; out.push(t); }
+            catch (e) { /* tab gone; drop it */ g.tabIds.delete(ids[i]); tabToGroup.delete(ids[i]); }
+          }
+          return out;
+        }
+        // Unknown group: return everything native, filtered by our tracking.
+        var clone = Object.assign({}, info);
+        delete clone.groupId;
+        var res = await nativeQuery(clone);
+        return res.filter(function (t) { return tabToGroup.get(t.id) === info.groupId; });
+      }
+      return nativeQuery(info);
+    })();
+  }
+
+  chrome.tabs.query = function (info, cb) {
+    var p = doQuery(info);
+    if (typeof cb === "function") { p.then(cb, function () { cb([]); }); return; }
+    return p;
+  };
+
+  // ── chrome.tabs.get (overlay emulated groupId) ──────────────────────
+  chrome.tabs.get = function (id, cb) {
+    var p = (async function () {
+      var t = await nativeGet(id);
+      var gid = tabToGroup.get(id);
+      if (gid != null) t.groupId = gid;
+      else if (t.groupId == null) t.groupId = NONE;
+      return t;
+    })();
+    if (typeof cb === "function") { p.then(cb, function () { cb(undefined); }); return; }
+    return p;
+  };
+
+  // ── chrome.tabGroups method overrides (in place) ────────────────────
+  function installTabGroups() {
+    var tg = chrome.tabGroups;
+    if (!tg) {
+      try { chrome.tabGroups = {}; tg = chrome.tabGroups; }
+      catch (e) { tg = null; }
+    }
+    if (!tg) { globalThis.__arcTabGroups = {}; tg = globalThis.__arcTabGroups; }
+
+    function set(k, v) { try { tg[k] = v; } catch (e) {} }
+
+    set("get", async function (id) { await ready; return groupObj(id); });
+    set("query", async function (info) {
+      await ready;
+      var out = [];
+      groups.forEach(function (g, id) {
+        var o = groupObj(id);
+        if (info) {
+          if (info.windowId != null && o.windowId !== info.windowId) return;
+          if (info.color != null && o.color !== info.color) return;
+          if (info.title != null && o.title !== info.title) return;
+          if (info.collapsed != null && o.collapsed !== info.collapsed) return;
+        }
+        out.push(o);
+      });
+      return out;
+    });
+    set("update", async function (id, props) {
+      await ready;
+      var g = groups.get(id);
+      if (!g) throw new Error("No group with id " + id);
+      if (props) {
+        if (props.title != null) g.title = props.title;
+        if (props.color != null) g.color = props.color;
+        if (props.collapsed != null) g.collapsed = props.collapsed;
+      }
+      await save();
+      return groupObj(id);
+    });
+    set("move", async function (id) { await ready; return groupObj(id); });
+
+    if (typeof tg.TAB_GROUP_ID_NONE === "undefined") set("TAB_GROUP_ID_NONE", NONE);
+    if (!tg.Color) set("Color", Color);
+    ["onCreated", "onUpdated", "onMoved", "onRemoved"].forEach(function (k) {
+      if (!tg[k]) set(k, { addListener: function () {}, removeListener: function () {} });
+    });
+  }
+  installTabGroups();
+
+  // Keep membership clean when tabs close.
+  try {
+    if (chrome.tabs.onRemoved && chrome.tabs.onRemoved.addListener) {
+      chrome.tabs.onRemoved.addListener(function (tabId) {
+        var gid = tabToGroup.get(tabId);
+        if (gid != null) {
+          var g = groups.get(gid);
+          if (g) g.tabIds.delete(tabId);
+          tabToGroup.delete(tabId);
+          save();
+        }
+      });
+    }
+  } catch (e) {}
+
+  globalThis.__arcTabGroupsShimInstalled = true;
+  console.log("[Arc TabGroups Shim] active");
+})();

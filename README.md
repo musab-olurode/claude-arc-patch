@@ -13,6 +13,7 @@ This patcher copies the official Claude extension and applies minimal patches to
 - **Floating sidebar panel** injected into web pages via a content script (replaces the unsupported sidePanel API)
 - **Service worker patch** that monkey-patches `chrome.sidePanel` calls and routes icon clicks to the floating panel
 - **Tab context patch** that fixes `chrome.tabs.query` so Claude can identify the active tab from within the iframe
+- **Tab Groups shim** that emulates the Chrome Tab Groups API, which Arc exposes but never resolves (this is what makes Claude's browser automation / agentic browsing work in Arc)
 - **Inline script extraction** to comply with Manifest V3 CSP requirements
 
 No original Claude extension code is modified. Only additional files are injected.
@@ -68,7 +69,23 @@ No original Claude extension code is modified. Only additional files are injecte
 | `floating-panel.js` | Content script that creates a sidebar panel on web pages |
 | `sw-patch.js` | Service worker patch: monkey-patches sidePanel API, handles icon clicks and keyboard shortcuts |
 | `arc-tabs-patch.js` | Patches `chrome.tabs.query` so the sidepanel can find the active tab from an iframe context |
+| `arc-tabgroups-shim.js` | Emulates the Chrome Tab Groups API in memory (loaded in the service worker) so browser automation works — see below |
 | `theme-init.js` | Extracted inline script for dark/light mode (CSP compliance) |
+
+### The Tab Groups problem (browser automation)
+
+Claude's extension organizes the tabs it drives into a "Claude-managed tab group" using the Chrome Tab Groups API. Every automation call (`tabs_context_mcp`, `navigate`, etc.) funnels through `createGroup()` → `chrome.tabs.group()`.
+
+Arc **exposes** this API surface — `chrome.tabGroups` is an object, `chrome.tabs.group` is a function, `chrome.tabGroups.TAB_GROUP_ID_NONE === -1` — but the calls **never resolve**. `chrome.tabs.group()` hangs forever, so the automation promise never settles and every request times out (~8s).
+
+Confirmed empirically in the service-worker console:
+
+```
+STEP created 1204885098
+STEP ERR TIMEOUT tabs.group      <-- chrome.tabs.group() never returns
+```
+
+`arc-tabgroups-shim.js` replaces the tab-group methods in place with a fully in-memory emulation keyed by synthetic group IDs. It tracks membership itself and intercepts `chrome.tabs.query({groupId})` / `chrome.tabs.get()` so the rest of the extension keeps working unmodified. Visual grouping is cosmetic (Arc doesn't render tab groups anyway), so emulation is sufficient. State is mirrored to `chrome.storage.session` to survive service-worker restarts.
 
 ### Architecture
 
@@ -103,6 +120,10 @@ No original Claude extension code is modified. Only additional files are injecte
 **Shortcut not working:**
 - Cmd+E only works after the page has loaded
 - Check `arc://extensions/shortcuts` for conflicts with other extensions
+
+**Browser automation / agentic browsing hangs or times out:**
+- Open the service-worker console (`arc://extensions` > Claude > "service worker") and confirm you see `[Arc TabGroups Shim] active` at startup
+- If it's missing, re-run `./patch.sh` and reload the extension
 
 **"Operation not permitted" when running patch.sh:**
 ```bash
