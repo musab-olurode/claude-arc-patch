@@ -14,6 +14,7 @@ This patcher copies the official Claude extension and applies minimal patches to
 - **Service worker patch** that monkey-patches `chrome.sidePanel` calls and routes icon clicks to the floating panel
 - **Tab context patch** that fixes `chrome.tabs.query` so Claude can identify the active tab from within the iframe
 - **Tab Groups shim** that emulates the Chrome Tab Groups API, which Arc exposes but never resolves (this is what makes Claude's browser automation / agentic browsing work in Arc)
+- **Cowork experience patch** that forces the classic sidepanel, because the newer "cowork" experience embeds a `claude.ai` iframe that Arc's frame nesting causes to be refused (this is what fixes the `claude.ai refused to connect` breakage — see below)
 - **Inline script extraction** to comply with Manifest V3 CSP requirements
 
 No original Claude extension code is modified. Only additional files are injected.
@@ -70,6 +71,7 @@ No original Claude extension code is modified. Only additional files are injecte
 | `sw-patch.js` | Service worker patch: monkey-patches sidePanel API, handles icon clicks and keyboard shortcuts |
 | `arc-tabs-patch.js` | Patches `chrome.tabs.query` so the sidepanel can find the active tab from an iframe context |
 | `arc-tabgroups-shim.js` | Emulates the Chrome Tab Groups API in memory (loaded in the service worker) so browser automation works — see below |
+| `arc-cowork-patch.js` | Forces the classic sidepanel (sets `preferCoworkExperience=false`) so the panel never embeds the `claude.ai` cowork iframe that Arc refuses — see below |
 | `theme-init.js` | Extracted inline script for dark/light mode (CSP compliance) |
 
 ### The Tab Groups problem (browser automation)
@@ -86,6 +88,26 @@ STEP ERR TIMEOUT tabs.group      <-- chrome.tabs.group() never returns
 ```
 
 `arc-tabgroups-shim.js` replaces the tab-group methods in place with a fully in-memory emulation keyed by synthetic group IDs. It tracks membership itself and intercepts `chrome.tabs.query({groupId})` / `chrome.tabs.get()` so the rest of the extension keeps working unmodified. Visual grouping is cosmetic (Arc doesn't render tab groups anyway), so emulation is sufficient. State is mirrored to `chrome.storage.session` to survive service-worker restarts.
+
+### The Cowork iframe problem (`claude.ai refused to connect`)
+
+Newer Claude extensions can render the sidepanel as a server-gated **"cowork" experience** (feature gate `chrome_ext_cowork_iframe`, preference key `preferCoworkExperience`). That experience is an embedded iframe:
+
+```html
+<iframe src="https://claude.ai/cic/new?surface=cic_sidepanel" ...>
+```
+
+In Chrome's real side panel the frame's ancestor chain is just `chrome-extension://<id>/sidepanel.html > claude.ai`, and `claude.ai`'s `frame-ancestors` CSP allows the extension origin, so it loads.
+
+In Arc there is no `chrome.sidePanel`, so the sidepanel runs as an iframe that `floating-panel.js` injects into the current web page. The chain becomes:
+
+```
+web page (top)  >  chrome-extension://<id>/sidepanel.html  >  claude.ai
+```
+
+`frame-ancestors` is checked against **every** ancestor, and the arbitrary top-level web page is not on `claude.ai`'s allow-list — so the frame is refused (**`claude.ai refused to connect`**) and the whole panel breaks. This flips on by itself whenever Anthropic enables the gate for an account, which is why it can start failing with **no version change** and **survives a clean reinstall**. The classic sidepanel is a local UI with no `claude.ai` iframe, so it works fine in Arc.
+
+The extension already ships this exact off-switch: its own **"Switch back to classic"** action just runs `chrome.storage.local.set({ preferCoworkExperience: false })`. `arc-cowork-patch.js` asserts that same preference before the sidepanel bundle reads it, so the panel always starts in the classic experience under Arc. No original code is modified — the extension's own preference decides everything. (Browser automation still works: it runs through the service worker + bridge + the tab-groups shim, independent of which sidepanel UI is shown.)
 
 ### Architecture
 
@@ -120,6 +142,11 @@ STEP ERR TIMEOUT tabs.group      <-- chrome.tabs.group() never returns
 **Shortcut not working:**
 - Cmd+E only works after the page has loaded
 - Check `arc://extensions/shortcuts` for conflicts with other extensions
+
+**Panel shows `claude.ai refused to connect` (or breaks after previously working):**
+- This is the cowork iframe issue above. Make sure you re-ran `./patch.sh` against your current Claude version and reloaded the extension in Arc.
+- Confirm the panel opened in classic mode: the sidepanel console (right-click panel > Inspect) should log `[Arc Cowork Patch] forced classic sidepanel` on first open.
+- One-off manual fallback (no re-patch needed): open the panel's overflow menu and choose **Switch back to classic**.
 
 **Browser automation / agentic browsing hangs or times out:**
 - Open the service-worker console (`arc://extensions` > Claude > "service worker") and confirm you see `[Arc TabGroups Shim] active` at startup

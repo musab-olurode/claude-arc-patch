@@ -12,6 +12,7 @@ FLOATING_PANEL_JS="$SCRIPT_DIR/floating-panel.js"
 SW_PATCH_JS="$SCRIPT_DIR/sw-patch.js"
 ARC_TABS_PATCH_JS="$SCRIPT_DIR/arc-tabs-patch.js"
 ARC_TABGROUPS_SHIM_JS="$SCRIPT_DIR/arc-tabgroups-shim.js"
+ARC_COWORK_PATCH_JS="$SCRIPT_DIR/arc-cowork-patch.js"
 
 # ── Colors ───────────────────────────────────────────────────────
 RED='\033[0;31m'
@@ -83,6 +84,7 @@ echo ""
 [ -f "$SW_PATCH_JS" ] || fail "sw-patch.js not found in $SCRIPT_DIR"
 [ -f "$ARC_TABS_PATCH_JS" ] || fail "arc-tabs-patch.js not found in $SCRIPT_DIR"
 [ -f "$ARC_TABGROUPS_SHIM_JS" ] || fail "arc-tabgroups-shim.js not found in $SCRIPT_DIR"
+[ -f "$ARC_COWORK_PATCH_JS" ] || fail "arc-cowork-patch.js not found in $SCRIPT_DIR"
 
 # Find or accept source path
 SOURCE_DIR=""
@@ -164,6 +166,11 @@ THEMEJS
 info "Adding arc-tabs-patch.js..."
 cp "$ARC_TABS_PATCH_JS" "$OUTPUT_DIR/arc-tabs-patch.js"
 
+# Copy cowork patch (forces the classic sidepanel; the newer "cowork" experience
+# embeds a claude.ai iframe that Arc's frame-ancestors refuses — see README)
+info "Adding arc-cowork-patch.js..."
+cp "$ARC_COWORK_PATCH_JS" "$OUTPUT_DIR/arc-cowork-patch.js"
+
 info "Patching sidepanel.html..."
 OUTPUT_DIR="$OUTPUT_DIR" python3 << 'PYEOF'
 import re, os
@@ -183,26 +190,34 @@ else:
     if os.path.exists(tj):
         os.remove(tj)
 
-# (2) Inject arc-tabs-patch.js before the first <script> so chrome.tabs.query is
-#     patched before the sidepanel bundle runs. A classic script executes before the
-#     deferred module bundle regardless of position. Anchored on <script>, not on the
-#     theme tag, so it survives future markup changes. Idempotent.
-if "arc-tabs-patch.js" not in html:
-    tag = '<script src="/arc-tabs-patch.js"></script>\n    '
+# (2) Inject our classic scripts before the first <script> so they run before the
+#     sidepanel bundle. A classic script executes before the deferred module bundle
+#     regardless of position. Anchored on <script>, not on the theme tag, so it
+#     survives future markup changes. Each injection is idempotent.
+#       - arc-tabs-patch.js:   patch chrome.tabs.query for the iframe context.
+#       - arc-cowork-patch.js: force the classic sidepanel (the newer "cowork"
+#         experience embeds a claude.ai iframe that Arc's frame-ancestors refuses).
+def inject_before_first_script(html, src):
+    if src in html:
+        return html
+    tag = '<script src="/%s"></script>\n    ' % src
     idx = html.find("<script")
     if idx != -1:
-        html = html[:idx] + tag + html[idx:]
-    else:
-        html = html.replace("</head>", "    " + tag + "</head>")
+        return html[:idx] + tag + html[idx:]
+    return html.replace("</head>", "    " + tag + "</head>")
+
+html = inject_before_first_script(html, "arc-tabs-patch.js")
+html = inject_before_first_script(html, "arc-cowork-patch.js")
 
 with open(path, "w") as f:
     f.write(html)
 
-# Fail loudly if the critical patch did not land — never report success silently.
+# Fail loudly if a critical patch did not land — never report success silently.
 assert "arc-tabs-patch.js" in html, "FAILED to inject arc-tabs-patch.js into sidepanel.html"
+assert "arc-cowork-patch.js" in html, "FAILED to inject arc-cowork-patch.js into sidepanel.html"
 print("OK")
 PYEOF
-ok "sidepanel.html patched (arc-tabs-patch.js injected)"
+ok "sidepanel.html patched (arc-tabs-patch.js + arc-cowork-patch.js injected)"
 
 # ── Patch manifest.json ─────────────────────────────────────────
 
