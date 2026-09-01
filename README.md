@@ -152,6 +152,13 @@ The extension already ships this exact off-switch: its own **"Switch back to cla
 - Open the service-worker console (`arc://extensions` > Claude > "service worker") and confirm you see `[Arc TabGroups Shim] active` at startup
 - If it's missing, re-run `./patch.sh` and reload the extension
 
+**The `arc://extensions` Errors page shows a wall of warnings:**
+- Lines like `... is not used because it is a cross-world extension resource mismatch` and `... was preloaded using link preload but not used within a few seconds` are **harmless**. They are standard Chromium noise for an extension page (`options.html`, `sidepanel.html`) loaded as an iframe, and they appear even when everything works — they are not the cause of any failure. As long as the panel opens and there is no `claude.ai refused to connect`, you're fine.
+- If something genuinely isn't working, judge it by the panel's own behavior and its console (right-click panel > Inspect), not by this passive Errors list.
+
+**Patch didn't seem to take after an update:**
+- Always patch against a **fresh, vanilla** Claude extension. Re-install/enable the official Claude extension in Chrome, `git pull` this repo (so you have the latest patch files), then re-run `./patch.sh` and **Load unpacked** the rebuilt `claude-arc-patched/` again in Arc (a reload alone may not pick up new files).
+
 **"Operation not permitted" when running patch.sh:**
 ```bash
 xattr -cr /path/to/claude-arc-patch
