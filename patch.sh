@@ -276,7 +276,12 @@ if not sidepanel_accessible:
 
 # Patch service worker background to also load sw-patch.js
 bg = manifest.get("background", {})
-if bg.get("service_worker"):
+if bg.get("service_worker") == "sw-loader.js":
+    # Source is already a patched output (e.g. re-patching claude-arc-patched
+    # itself because the vanilla copy is gone). Without this guard the loader
+    # would be rewritten to import itself and the real bundle would never load.
+    print("manifest already points at sw-loader.js; leaving loaders untouched")
+elif bg.get("service_worker"):
     # Replace single service worker with a loader that imports both
     original_sw = bg["service_worker"]
     bg["service_worker"] = "sw-loader.js"
