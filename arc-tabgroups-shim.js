@@ -27,6 +27,10 @@
 
 (function () {
   "use strict";
+  try { if (typeof document !== "undefined" && document.documentElement) document.documentElement.dataset.arcTabGroupsInstall = "started"; } catch (e) {}
+  if (typeof window !== "undefined") window.addEventListener("error", function (ev) {
+    try { if (ev && ev.filename && /arc-tabgroups-shim/.test(ev.filename)) document.documentElement.dataset.arcTabGroupsError = String(ev.message); } catch (e) {}
+  });
 
   if (typeof chrome === "undefined" || !chrome.tabs) return;
   if (globalThis.__arcTabGroupsShimInstalled) return;
@@ -49,6 +53,7 @@
 
   // ── Persistence (survive MV3 service-worker restarts) ───────────────
   var STORE_KEY = "__arcEmulatedTabGroups";
+  var storageOk = true;
 
   function save() {
     try {
@@ -65,10 +70,22 @@
     } catch (e) { return Promise.resolve(); }
   }
 
+  function mirrorForDebug() {
+    // In document contexts (sidepanel.html) expose the emulated state on the
+    // root element so it can be inspected without extension-API access.
+    try {
+      if (typeof document !== "undefined" && document.documentElement) {
+        var arr = [];
+        groups.forEach(function (g, id) { arr.push({ id: id, tabIds: Array.from(g.tabIds) }); });
+        document.documentElement.dataset.arcTabGroups = JSON.stringify({ storageOk: storageOk, groups: arr });
+      }
+    } catch (e) {}
+  }
+
   function applySaved(saved) {
     groups.clear();
     tabToGroup.clear();
-    if (!saved) return; // store cleared (e.g. extension reload) → empty state
+    if (!saved) { mirrorForDebug(); return; } // store cleared (e.g. extension reload) → empty state
     if (saved.nextGroupId && saved.nextGroupId > nextGroupId) nextGroupId = saved.nextGroupId;
     (saved.groups || []).forEach(function (g) {
       groups.set(g.id, {
@@ -77,9 +94,9 @@
       });
       g.tabIds.forEach(function (t) { tabToGroup.set(t, g.id); });
     });
+    mirrorForDebug();
   }
 
-  var storageOk = true;
   async function refresh() {
     if (!storageOk) return;
     try {
@@ -114,6 +131,8 @@
   // ── Native references (used only for non-group tab operations) ──────
   var nativeQuery = chrome.tabs.query.bind(chrome.tabs);
   var nativeGet = chrome.tabs.get.bind(chrome.tabs);
+  var nativeGroupRef = chrome.tabs.group, nativeQueryRef = chrome.tabs.query;
+  var nativeTabGroupsQueryRef = chrome.tabGroups && chrome.tabGroups.query;
 
   // ── chrome.tabs.group ───────────────────────────────────────────────
   chrome.tabs.group = async function (opts) {
@@ -270,5 +289,18 @@
   } catch (e) {}
 
   globalThis.__arcTabGroupsShimInstalled = true;
+
+  // Debug: record whether the overrides actually took effect in this context.
+  try {
+    if (typeof document !== "undefined" && document.documentElement) {
+      document.documentElement.dataset.arcTabGroupsInstall = JSON.stringify({
+        groupOverridden: chrome.tabs.group !== nativeGroupRef,
+        getOverridden: chrome.tabs.get !== nativeGet,
+        queryOverridden: chrome.tabs.query !== nativeQueryRef,
+        tabGroupsGet: typeof chrome.tabGroups.get,
+        tabGroupsQueryOverridden: chrome.tabGroups.query !== nativeTabGroupsQueryRef
+      });
+    }
+  } catch (e) {}
   console.log("[Arc TabGroups Shim] active");
 })();

@@ -174,6 +174,12 @@ register its own listeners as well, or every click toggles the panel twice (open
   rather than `sw-loader.js`, Arc is on the stale manifest — same fix as above. With this version of the patch
   the console should log `[Claude Arc Patch] ...` lines either way.
 
+**Agent says new tabs "aren't part of my tab group" right after you reloaded the extension:**
+- A panel that was already open keeps running the old code (its console shows `Extension context invalidated`). Close the
+  panel and open it again. You can confirm the shim is active in the panel: open
+  `chrome-extension://fcoeoabgfenejglbffodgkkbkcdhcgfn/sidepanel.html?mode=window&tabId=<tabId>` in a tab and inspect
+  `document.documentElement.dataset.arcTabGroupsInstall` / `.arcTabGroups` (the shim mirrors its state there).
+
 **Login issues:**
 - Make sure you're logged into Claude in Chrome first
 - The patched extension shares the same authentication
