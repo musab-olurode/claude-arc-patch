@@ -16,6 +16,7 @@ This patcher copies the official Claude extension and applies minimal patches to
 - **Tab Groups shim** that emulates the Chrome Tab Groups API, which Arc exposes but never resolves (this is what makes Claude's browser automation / agentic browsing work in Arc)
 - **Cowork experience patch** that forces the classic sidepanel, because the newer "cowork" experience embeds a `claude.ai` iframe that Arc's frame nesting causes to be refused (this is what fixes the `claude.ai refused to connect` breakage — see below)
 - **Inline script extraction** to comply with Manifest V3 CSP requirements
+- **Stale-manifest resilience**: Arc has been observed to keep using the manifest it parsed at first load, so the patches are also wired into the original service-worker entry point, the floating panel is registered as a dynamic content script, and the panel falls back to a popup window when the in-page iframe would be blocked (see below)
 
 No original Claude extension code is modified. Only additional files are injected.
 
@@ -109,6 +110,31 @@ web page (top)  >  chrome-extension://<id>/sidepanel.html  >  claude.ai
 
 The extension already ships this exact off-switch: its own **"Switch back to classic"** action just runs `chrome.storage.local.set({ preferCoworkExperience: false })`. `arc-cowork-patch.js` asserts that same preference before the sidepanel bundle reads it, so the panel always starts in the classic experience under Arc. No original code is modified — the extension's own preference decides everything. (Browser automation still works: it runs through the service worker + bridge + the tab-groups shim, independent of which sidepanel UI is shown.)
 
+### The stale-manifest problem (patch loads but nothing happens)
+
+Arc does not reliably re-parse `manifest.json` when you press **Reload** on an unpacked extension (this was
+reproduced with `chrome.developerPrivate.reload` too: even a version bump in the manifest was not picked up).
+Files *are* served fresh from the folder, but the registered service worker stays the original
+`service-worker-loader.js`, the `floating-panel.js` content script is never registered, and `sidepanel.html`
+is not web-accessible — so the extension icon does nothing, or the panel opens and shows
+**"This page has been blocked by Arc"**.
+
+Three things make the patch robust to this:
+
+- `patch.sh` also prepends the patch imports to the original loader, so whichever entry point Arc uses, the
+  patches load.
+- `sw-patch.js` registers `floating-panel.js` via `chrome.scripting.registerContentScripts` at startup.
+- `sw-patch.js` checks the manifest Arc actually parsed (`chrome.runtime.getManifest()`); if `sidepanel.html`
+  is not web-accessible, the panel opens as a popup window (`sidepanel.html?mode=window&tabId=…`, the mode the
+  extension already uses for scheduled tasks) instead of a blocked iframe. A fresh **Remove** + **Load unpacked**
+  makes Arc parse the patched manifest, after which the in-page panel is used automatically.
+
+Note also that Arc **exposes** `chrome.sidePanel` (`open`/`setOptions` exist and even create side-panel
+contexts) but never renders it — the same pattern as the Tab Groups API. Feature detection therefore cannot be
+used; `sw-patch.js` overrides `chrome.sidePanel` unconditionally. The original service worker's own
+`action.onClicked` / `commands.onCommand` listeners call `chrome.sidePanel.open()`, so `sw-patch.js` must not
+register its own listeners as well, or every click toggles the panel twice (open, then instantly close).
+
 ### Architecture
 
 ```
@@ -134,6 +160,15 @@ The extension already ships this exact off-switch: its own **"Switch back to cla
 - Make sure the extension is enabled at `arc://extensions`
 - Refresh the page (Cmd+R)
 - Check console for errors (Cmd+Option+I)
+
+**Panel opens as a separate popup window instead of a sidebar, or shows "This page has been blocked by Arc":**
+- Arc is still using the manifest from the first load (see *The stale-manifest problem* above). In `arc://extensions`
+  **Remove** Claude, then **Load unpacked** the `claude-arc-patched` folder again. Reload alone is not enough.
+
+**Icon click does nothing and the service-worker console is empty:**
+- Open `arc://extensions` > Claude > "service worker". If the DevTools title says `service-worker-loader.js`
+  rather than `sw-loader.js`, Arc is on the stale manifest — same fix as above. With this version of the patch
+  the console should log `[Claude Arc Patch] ...` lines either way.
 
 **Login issues:**
 - Make sure you're logged into Claude in Chrome first

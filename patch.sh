@@ -287,6 +287,23 @@ if bg.get("service_worker"):
         f.write(f'import "./arc-tabgroups-shim.js";\n')
         f.write(f'import "./{original_sw}";\n')
 
+    # Also make the ORIGINAL entry point load the patches. Arc has been seen to
+    # keep using the manifest it parsed at first load (service_worker still
+    # pointing at the original loader) even after "Reload", which left every
+    # patch inert. ES modules are only evaluated once, so importing the patch
+    # files from both loaders is safe.
+    orig_path = os.path.join(os.environ["OUTPUT_DIR"], original_sw)
+    with open(orig_path, "r") as f:
+        orig_src = f.read()
+    if "sw-patch.js" not in orig_src:
+        with open(orig_path, "w") as f:
+            f.write('// Arc may keep using this entry point even after the manifest is patched\n')
+            f.write('// (it does not always re-parse manifest.json on Reload), so load the Arc\n')
+            f.write('// patches from here as well.\n')
+            f.write('import "./sw-patch.js";\n')
+            f.write('import "./arc-tabgroups-shim.js";\n')
+            f.write(orig_src)
+
 # Remove side_panel key if present (not supported in Arc)
 if "side_panel" in manifest:
     del manifest["side_panel"]
