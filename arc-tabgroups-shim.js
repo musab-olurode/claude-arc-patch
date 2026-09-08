@@ -27,6 +27,10 @@
 
 (function () {
   "use strict";
+  try { if (typeof document !== "undefined" && document.documentElement) document.documentElement.dataset.arcTabGroupsInstall = "started"; } catch (e) {}
+  if (typeof window !== "undefined") window.addEventListener("error", function (ev) {
+    try { if (ev && ev.filename && /arc-tabgroups-shim/.test(ev.filename)) document.documentElement.dataset.arcTabGroupsError = String(ev.message); } catch (e) {}
+  });
 
   if (typeof chrome === "undefined" || !chrome.tabs) return;
   if (globalThis.__arcTabGroupsShimInstalled) return;
@@ -49,6 +53,7 @@
 
   // ── Persistence (survive MV3 service-worker restarts) ───────────────
   var STORE_KEY = "__arcEmulatedTabGroups";
+  var storageOk = true;
 
   function save() {
     try {
@@ -65,22 +70,54 @@
     } catch (e) { return Promise.resolve(); }
   }
 
-  var ready = (async function load() {
+  function mirrorForDebug() {
+    // In document contexts (sidepanel.html) expose the emulated state on the
+    // root element so it can be inspected without extension-API access.
+    try {
+      if (typeof document !== "undefined" && document.documentElement) {
+        var arr = [];
+        groups.forEach(function (g, id) { arr.push({ id: id, tabIds: Array.from(g.tabIds) }); });
+        document.documentElement.dataset.arcTabGroups = JSON.stringify({ storageOk: storageOk, groups: arr });
+      }
+    } catch (e) {}
+  }
+
+  function applySaved(saved) {
+    groups.clear();
+    tabToGroup.clear();
+    if (!saved) { mirrorForDebug(); return; } // store cleared (e.g. extension reload) → empty state
+    if (saved.nextGroupId && saved.nextGroupId > nextGroupId) nextGroupId = saved.nextGroupId;
+    (saved.groups || []).forEach(function (g) {
+      groups.set(g.id, {
+        title: g.title, color: g.color, collapsed: g.collapsed,
+        windowId: g.windowId, tabIds: new Set(g.tabIds)
+      });
+      g.tabIds.forEach(function (t) { tabToGroup.set(t, g.id); });
+    });
+    mirrorForDebug();
+  }
+
+  async function refresh() {
+    if (!storageOk) return;
     try {
       var d = await chrome.storage.session.get(STORE_KEY);
-      var saved = d && d[STORE_KEY];
-      if (saved) {
-        if (saved.nextGroupId) nextGroupId = saved.nextGroupId;
-        (saved.groups || []).forEach(function (g) {
-          groups.set(g.id, {
-            title: g.title, color: g.color, collapsed: g.collapsed,
-            windowId: g.windowId, tabIds: new Set(g.tabIds)
-          });
-          g.tabIds.forEach(function (t) { tabToGroup.set(t, g.id); });
-        });
-      }
-    } catch (e) { /* storage.session unavailable → in-memory only */ }
-  })();
+      applySaved(d && d[STORE_KEY]);
+    } catch (e) { storageOk = false; /* storage.session unavailable → in-memory only */ }
+  }
+  var ready = refresh();
+
+  // The shim runs in more than one context: the service worker (Claude Code
+  // bridge tools) AND the sidepanel page (the in-panel agent's own tools such
+  // as tabs_create execute there). Each context has its own in-memory copy,
+  // so mirror every change through storage.session to keep them consistent.
+  // Without this the panel sees the host tab as ungrouped, never adds new tabs
+  // to the group, and the agent ends up navigating the panel's own tab.
+  try {
+    chrome.storage.onChanged.addListener(function (changes, area) {
+      if (area !== "session" || !changes[STORE_KEY]) return;
+      applySaved(changes[STORE_KEY].newValue);
+    });
+  } catch (e) {}
 
   function groupObj(id) {
     var g = groups.get(id);
@@ -94,10 +131,13 @@
   // ── Native references (used only for non-group tab operations) ──────
   var nativeQuery = chrome.tabs.query.bind(chrome.tabs);
   var nativeGet = chrome.tabs.get.bind(chrome.tabs);
+  var nativeGroupRef = chrome.tabs.group, nativeQueryRef = chrome.tabs.query;
+  var nativeTabGroupsQueryRef = chrome.tabGroups && chrome.tabGroups.query;
 
   // ── chrome.tabs.group ───────────────────────────────────────────────
   chrome.tabs.group = async function (opts) {
     await ready;
+    await refresh(); // another context may have written since we last looked
     opts = opts || {};
     var tabIds = [].concat(opts.tabIds || []);
     var gid = opts.groupId;
@@ -122,6 +162,7 @@
   // ── chrome.tabs.ungroup ─────────────────────────────────────────────
   chrome.tabs.ungroup = async function (tabIds) {
     await ready;
+    await refresh();
     [].concat(tabIds || []).forEach(function (t) {
       var gid = tabToGroup.get(t);
       if (gid != null) {
@@ -207,6 +248,7 @@
     });
     set("update", async function (id, props) {
       await ready;
+      await refresh();
       var g = groups.get(id);
       if (!g) throw new Error("No group with id " + id);
       if (props) {
@@ -231,17 +273,34 @@
   try {
     if (chrome.tabs.onRemoved && chrome.tabs.onRemoved.addListener) {
       chrome.tabs.onRemoved.addListener(function (tabId) {
-        var gid = tabToGroup.get(tabId);
-        if (gid != null) {
-          var g = groups.get(gid);
-          if (g) g.tabIds.delete(tabId);
-          tabToGroup.delete(tabId);
-          save();
-        }
+        // Re-read first: this fires in every context, and a stale copy must
+        // never overwrite the shared state.
+        ready.then(refresh).then(function () {
+          var gid = tabToGroup.get(tabId);
+          if (gid != null) {
+            var g = groups.get(gid);
+            if (g) g.tabIds.delete(tabId);
+            tabToGroup.delete(tabId);
+            save();
+          }
+        });
       });
     }
   } catch (e) {}
 
   globalThis.__arcTabGroupsShimInstalled = true;
+
+  // Debug: record whether the overrides actually took effect in this context.
+  try {
+    if (typeof document !== "undefined" && document.documentElement) {
+      document.documentElement.dataset.arcTabGroupsInstall = JSON.stringify({
+        groupOverridden: chrome.tabs.group !== nativeGroupRef,
+        getOverridden: chrome.tabs.get !== nativeGet,
+        queryOverridden: chrome.tabs.query !== nativeQueryRef,
+        tabGroupsGet: typeof chrome.tabGroups.get,
+        tabGroupsQueryOverridden: chrome.tabGroups.query !== nativeTabGroupsQueryRef
+      });
+    }
+  } catch (e) {}
   console.log("[Arc TabGroups Shim] active");
 })();

@@ -69,14 +69,17 @@
 
   // ── Get tab ID from service worker ──────────────────────────────
 
-  async function getTabId() {
+  async function getTabInfo() {
     return new Promise((resolve) => {
       try {
         chrome.runtime.sendMessage({ type: "GET_TAB_ID" }, (response) => {
-          resolve(response?.tabId || 0);
+          if (response?.diag) {
+            try { wrapper.dataset.arcDiag = JSON.stringify(response.diag); } catch (e) {}
+          }
+          resolve({ tabId: response?.tabId || 0, iframeAllowed: response?.iframeAllowed !== false });
         });
       } catch (e) {
-        resolve(0);
+        resolve({ tabId: 0, iframeAllowed: true });
       }
     });
   }
@@ -86,7 +89,16 @@
   async function showPanel() {
     let iframe = contentEl.querySelector("iframe");
     if (!iframe) {
-      const tabId = await getTabId();
+      const { tabId, iframeAllowed } = await getTabInfo();
+      if (!iframeAllowed) {
+        // The manifest Arc parsed does not expose sidepanel.html to web pages,
+        // so an iframe would be blocked. Ask the service worker for a popup
+        // window instead and keep the in-page shell hidden.
+        try {
+          chrome.runtime.sendMessage({ type: "ARC_OPEN_PANEL_WINDOW", tabId }, () => void chrome.runtime.lastError);
+        } catch (e) {}
+        return;
+      }
       iframe = document.createElement("iframe");
       iframe.src = `chrome-extension://${EXTENSION_ID}/sidepanel.html?tabId=${tabId}`;
       iframe.allow = "clipboard-read; clipboard-write";
