@@ -181,9 +181,11 @@ register its own listeners as well, or every click toggles the panel twice (open
   `document.documentElement.dataset.arcTabGroupsInstall` / `.arcTabGroups` (the shim mirrors its state there).
 
 **Panel only shows "Claude is active in this tab group" / "Open chat" on every tab:**
-- Fixed in this version: emulated group ids used to restart at 900001 after every extension reload while the extension's own
-  group registry (`chrome.storage.local`) persisted, so a new tab could inherit a stale group and be treated as a
-  *secondary* tab. Ids are now clock-seeded and persisted. After updating, reload the extension and reopen the panel.
+- Fixed in this version. The extension's TabGroupManager reconciles its registry against `chrome.tabs.query({})` on every
+  initialize; the shim used to return native (ungrouped) results for plain queries, so reconcile deleted every registered
+  group, and the panel then saw its tab as a *secondary* member of an unregistered group. Plain queries now carry the
+  emulated `groupId`. Emulated ids are also clock-seeded and persisted so they never collide with stale registry entries
+  after an extension reload. After updating, reload the extension and reopen the panel.
 
 **`patch.sh` says the source path does not exist after you removed the extension from Arc:**
 - Arc deletes the Web Store copy under `~/Library/Application Support/Arc/User Data/Default/Extensions/<id>/` when the
