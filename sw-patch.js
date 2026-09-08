@@ -20,6 +20,19 @@ const _iframeAllowed = (() => {
 })();
 console.log("[Claude Arc Patch] sidepanel iframe allowed by parsed manifest:", _iframeAllowed);
 
+// Panel mode. "window" (default): sidepanel.html?mode=window in a popup
+// window. "iframe": the in-page floating panel. The in-page panel lives
+// inside the tab's document, so whenever the agent navigates its own tab —
+// which it does routinely, e.g. "look this up in the docs" — the page, the
+// panel and the running agent are all destroyed. A popup window survives
+// navigation exactly like Chrome's real side panel does.
+let _panelMode = "window";
+function _useIframe() { return _panelMode === "iframe" && _iframeAllowed; }
+try {
+  chrome.storage.local.get("arcPanelMode", d => { if (d && (d.arcPanelMode === "iframe" || d.arcPanelMode === "window")) _panelMode = d.arcPanelMode; });
+  chrome.storage.onChanged.addListener((ch, area) => { if (area === "local" && ch.arcPanelMode) _panelMode = ch.arcPanelMode.newValue === "iframe" ? "iframe" : "window"; });
+} catch (e) {}
+
 // ── Fallback: open the panel as a popup window ──────────────────────
 // The extension itself supports sidepanel.html?mode=window (used for its
 // scheduled tasks), and honours an explicit tabId parameter.
@@ -37,8 +50,28 @@ async function _openPanelWindow(tabId) {
     }
   }
   const url = chrome.runtime.getURL(`sidepanel.html?mode=window&tabId=${encodeURIComponent(tabId)}`);
-  const win = await chrome.windows.create({ url, type: "popup", width: 460, height: 800, focused: true });
-  if (win?.id != null) _panelWindows.set(tabId, win.id);
+  // Dock the window to the right edge of the tab's browser window, full
+  // height, side-panel width — as close to Chrome's side panel as Arc allows.
+  const PANEL_WIDTH = 420;
+  let bounds = { width: PANEL_WIDTH, height: 800 };
+  try {
+    const tab = await chrome.tabs.get(tabId);
+    const host = await chrome.windows.get(tab.windowId);
+    if (host && host.width && host.height) {
+      bounds = { width: PANEL_WIDTH, height: host.height, left: (host.left || 0) + host.width - PANEL_WIDTH, top: host.top || 0 };
+    }
+  } catch (e) {}
+  const win = await chrome.windows.create({ url, type: "popup", focused: true, ...bounds });
+  if (win?.id != null) {
+    _panelWindows.set(tabId, win.id);
+    // Arc ignores the bounds given to windows.create for popups; applying
+    // them again with windows.update (after the window exists) works.
+    if (bounds.left != null) {
+      for (const delay of [0, 300, 1200]) {
+        setTimeout(() => chrome.windows.update(win.id, bounds).catch(() => {}), delay);
+      }
+    }
+  }
 }
 
 chrome.windows.onRemoved.addListener(windowId => {
@@ -68,7 +101,7 @@ async function _toggleFloatingPanel(tabId) {
 }
 
 async function _openPanel(tabId) {
-  if (_iframeAllowed) await _toggleFloatingPanel(tabId);
+  if (_useIframe()) await _toggleFloatingPanel(tabId);
   else await _openPanelWindow(tabId);
 }
 
@@ -109,7 +142,7 @@ chrome.sidePanel.getOptions = async function () {
 chrome.sidePanel.getPanelBehavior = async function () {
   return { openPanelOnActionClick: true };
 };
-console.log("[Claude Arc Patch] chrome.sidePanel routed to", _iframeAllowed ? "floating panel" : "popup window");
+console.log("[Claude Arc Patch] chrome.sidePanel routed to", _useIframe() ? "floating panel" : "popup window");
 
 // Register floating-panel.js as a dynamic content script. The manifest also
 // declares it, but Arc has been observed to keep serving the manifest it parsed
@@ -137,7 +170,7 @@ console.log("[Claude Arc Patch] chrome.sidePanel routed to", _iframeAllowed ? "f
 // Messages from the floating-panel content script
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === "GET_TAB_ID") {
-    sendResponse({ tabId: sender.tab?.id || 0, iframeAllowed: _iframeAllowed, diag: { ..._diag, iframeAllowed: _iframeAllowed } });
+    sendResponse({ tabId: sender.tab?.id || 0, iframeAllowed: _useIframe(), diag: { ..._diag, iframeAllowed: _iframeAllowed, panelMode: _panelMode } });
     return true;
   }
   if (message.type === "ARC_OPEN_PANEL_WINDOW") {

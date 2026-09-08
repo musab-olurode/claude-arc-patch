@@ -114,6 +114,18 @@ web page (top)  >  chrome-extension://<id>/sidepanel.html  >  claude.ai
 
 The extension already ships this exact off-switch: its own **"Switch back to classic"** action just runs `chrome.storage.local.set({ preferCoworkExperience: false })`. `arc-cowork-patch.js` asserts that same preference before the sidepanel bundle reads it, so the panel always starts in the classic experience under Arc. No original code is modified — the extension's own preference decides everything. (Browser automation still works: it runs through the service worker + bridge + the tab-groups shim, independent of which sidepanel UI is shown.)
 
+### Panel mode: popup window (default) vs in-page floating panel
+
+The floating panel is an iframe inside the tab's own document. Chrome's real side panel lives outside the page, so
+the agent can navigate its own tab freely. In the iframe design every such navigation — and the agent does it
+routinely ("look this up in the docs") — destroys the page, the panel *and the running agent*. The patch therefore
+opens the panel as a popup window (`sidepanel.html?mode=window&tabId=…`, the mode the extension itself uses for
+scheduled tasks) by default. It survives navigation and behaves like the Chrome side panel.
+
+To use the in-page floating panel instead (fine for chatting, not for agent runs that navigate the current tab), set
+`arcPanelMode` to `"iframe"` in the extension's `chrome.storage.local`, e.g. from the service-worker console:
+`chrome.storage.local.set({ arcPanelMode: "iframe" })`. Set it to `"window"` (or remove it) to go back.
+
 ### The stale-manifest problem (patch loads but nothing happens)
 
 Arc does not reliably re-parse `manifest.json` when you press **Reload** on an unpacked extension (this was
