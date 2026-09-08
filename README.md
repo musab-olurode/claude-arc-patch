@@ -71,7 +71,7 @@ No original Claude extension code is modified. Only additional files are injecte
 | `floating-panel.js` | Content script that creates a sidebar panel on web pages |
 | `sw-patch.js` | Service worker patch: monkey-patches sidePanel API, handles icon clicks and keyboard shortcuts |
 | `arc-tabs-patch.js` | Patches `chrome.tabs.query` so the sidepanel can find the active tab from an iframe context |
-| `arc-tabgroups-shim.js` | Emulates the Chrome Tab Groups API in memory (loaded in the service worker) so browser automation works — see below |
+| `arc-tabgroups-shim.js` | Emulates the Chrome Tab Groups API in memory (loaded in the service worker **and** the sidepanel page, synced via `storage.session`) so browser automation works — see below |
 | `arc-cowork-patch.js` | Forces the classic sidepanel (sets `preferCoworkExperience=false`) so the panel never embeds the `claude.ai` cowork iframe that Arc refuses — see below |
 | `theme-init.js` | Extracted inline script for dark/light mode (CSP compliance) |
 
@@ -88,7 +88,11 @@ STEP created 1204885098
 STEP ERR TIMEOUT tabs.group      <-- chrome.tabs.group() never returns
 ```
 
-`arc-tabgroups-shim.js` replaces the tab-group methods in place with a fully in-memory emulation keyed by synthetic group IDs. It tracks membership itself and intercepts `chrome.tabs.query({groupId})` / `chrome.tabs.get()` so the rest of the extension keeps working unmodified. Visual grouping is cosmetic (Arc doesn't render tab groups anyway), so emulation is sufficient. State is mirrored to `chrome.storage.session` to survive service-worker restarts.
+`arc-tabgroups-shim.js` replaces the tab-group methods in place with a fully in-memory emulation keyed by synthetic group IDs.
+It is loaded in **both** the service worker and `sidepanel.html`: the Claude Code bridge tools run in the service worker, but
+the in-panel agent's own tools (`tabs_create`, `navigate`, …) run inside the sidepanel page. With the shim only in the service
+worker, the panel saw its host tab as ungrouped, new tabs never joined the group, and the agent fell back to navigating the tab
+that hosts the panel — which destroyed the panel. The copies stay consistent through `chrome.storage.session` + `onChanged`. It tracks membership itself and intercepts `chrome.tabs.query({groupId})` / `chrome.tabs.get()` so the rest of the extension keeps working unmodified. Visual grouping is cosmetic (Arc doesn't render tab groups anyway), so emulation is sufficient. State is mirrored to `chrome.storage.session` to survive service-worker restarts.
 
 ### The Cowork iframe problem (`claude.ai refused to connect`)
 

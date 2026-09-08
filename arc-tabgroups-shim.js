@@ -65,22 +65,42 @@
     } catch (e) { return Promise.resolve(); }
   }
 
-  var ready = (async function load() {
+  function applySaved(saved) {
+    groups.clear();
+    tabToGroup.clear();
+    if (!saved) return; // store cleared (e.g. extension reload) → empty state
+    if (saved.nextGroupId && saved.nextGroupId > nextGroupId) nextGroupId = saved.nextGroupId;
+    (saved.groups || []).forEach(function (g) {
+      groups.set(g.id, {
+        title: g.title, color: g.color, collapsed: g.collapsed,
+        windowId: g.windowId, tabIds: new Set(g.tabIds)
+      });
+      g.tabIds.forEach(function (t) { tabToGroup.set(t, g.id); });
+    });
+  }
+
+  var storageOk = true;
+  async function refresh() {
+    if (!storageOk) return;
     try {
       var d = await chrome.storage.session.get(STORE_KEY);
-      var saved = d && d[STORE_KEY];
-      if (saved) {
-        if (saved.nextGroupId) nextGroupId = saved.nextGroupId;
-        (saved.groups || []).forEach(function (g) {
-          groups.set(g.id, {
-            title: g.title, color: g.color, collapsed: g.collapsed,
-            windowId: g.windowId, tabIds: new Set(g.tabIds)
-          });
-          g.tabIds.forEach(function (t) { tabToGroup.set(t, g.id); });
-        });
-      }
-    } catch (e) { /* storage.session unavailable → in-memory only */ }
-  })();
+      applySaved(d && d[STORE_KEY]);
+    } catch (e) { storageOk = false; /* storage.session unavailable → in-memory only */ }
+  }
+  var ready = refresh();
+
+  // The shim runs in more than one context: the service worker (Claude Code
+  // bridge tools) AND the sidepanel page (the in-panel agent's own tools such
+  // as tabs_create execute there). Each context has its own in-memory copy,
+  // so mirror every change through storage.session to keep them consistent.
+  // Without this the panel sees the host tab as ungrouped, never adds new tabs
+  // to the group, and the agent ends up navigating the panel's own tab.
+  try {
+    chrome.storage.onChanged.addListener(function (changes, area) {
+      if (area !== "session" || !changes[STORE_KEY]) return;
+      applySaved(changes[STORE_KEY].newValue);
+    });
+  } catch (e) {}
 
   function groupObj(id) {
     var g = groups.get(id);
@@ -98,6 +118,7 @@
   // ── chrome.tabs.group ───────────────────────────────────────────────
   chrome.tabs.group = async function (opts) {
     await ready;
+    await refresh(); // another context may have written since we last looked
     opts = opts || {};
     var tabIds = [].concat(opts.tabIds || []);
     var gid = opts.groupId;
@@ -122,6 +143,7 @@
   // ── chrome.tabs.ungroup ─────────────────────────────────────────────
   chrome.tabs.ungroup = async function (tabIds) {
     await ready;
+    await refresh();
     [].concat(tabIds || []).forEach(function (t) {
       var gid = tabToGroup.get(t);
       if (gid != null) {
@@ -207,6 +229,7 @@
     });
     set("update", async function (id, props) {
       await ready;
+      await refresh();
       var g = groups.get(id);
       if (!g) throw new Error("No group with id " + id);
       if (props) {
@@ -231,13 +254,17 @@
   try {
     if (chrome.tabs.onRemoved && chrome.tabs.onRemoved.addListener) {
       chrome.tabs.onRemoved.addListener(function (tabId) {
-        var gid = tabToGroup.get(tabId);
-        if (gid != null) {
-          var g = groups.get(gid);
-          if (g) g.tabIds.delete(tabId);
-          tabToGroup.delete(tabId);
-          save();
-        }
+        // Re-read first: this fires in every context, and a stale copy must
+        // never overwrite the shared state.
+        ready.then(refresh).then(function () {
+          var gid = tabToGroup.get(tabId);
+          if (gid != null) {
+            var g = groups.get(gid);
+            if (g) g.tabIds.delete(tabId);
+            tabToGroup.delete(tabId);
+            save();
+          }
+        });
       });
     }
   } catch (e) {}

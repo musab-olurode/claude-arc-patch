@@ -208,6 +208,10 @@ def inject_before_first_script(html, src):
 
 html = inject_before_first_script(html, "arc-tabs-patch.js")
 html = inject_before_first_script(html, "arc-cowork-patch.js")
+# The in-panel agent's tools (tabs_create, navigate, ...) execute inside the
+# sidepanel page, so the Tab Groups shim must be present there too — it must
+# load first so arc-tabs-patch.js wraps the shimmed chrome.tabs.query.
+html = inject_before_first_script(html, "arc-tabgroups-shim.js")
 
 with open(path, "w") as f:
     f.write(html)
@@ -215,9 +219,10 @@ with open(path, "w") as f:
 # Fail loudly if a critical patch did not land — never report success silently.
 assert "arc-tabs-patch.js" in html, "FAILED to inject arc-tabs-patch.js into sidepanel.html"
 assert "arc-cowork-patch.js" in html, "FAILED to inject arc-cowork-patch.js into sidepanel.html"
+assert "arc-tabgroups-shim.js" in html, "FAILED to inject arc-tabgroups-shim.js into sidepanel.html"
 print("OK")
 PYEOF
-ok "sidepanel.html patched (arc-tabs-patch.js + arc-cowork-patch.js injected)"
+ok "sidepanel.html patched (arc-tabgroups-shim.js + arc-tabs-patch.js + arc-cowork-patch.js injected)"
 
 # ── Patch manifest.json ─────────────────────────────────────────
 
