@@ -114,6 +114,18 @@ web page (top)  >  chrome-extension://<id>/sidepanel.html  >  claude.ai
 
 The extension already ships this exact off-switch: its own **"Switch back to classic"** action just runs `chrome.storage.local.set({ preferCoworkExperience: false })`. `arc-cowork-patch.js` asserts that same preference before the sidepanel bundle reads it, so the panel always starts in the classic experience under Arc. No original code is modified — the extension's own preference decides everything. (Browser automation still works: it runs through the service worker + bridge + the tab-groups shim, independent of which sidepanel UI is shown.)
 
+### Panel mode: popup window (default) vs in-page floating panel
+
+The floating panel is an iframe inside the tab's own document. Chrome's real side panel lives outside the page, so
+the agent can navigate its own tab freely. In the iframe design every such navigation — and the agent does it
+routinely ("look this up in the docs") — destroys the page, the panel *and the running agent*. The patch therefore
+opens the panel as a popup window (`sidepanel.html?mode=window&tabId=…`, the mode the extension itself uses for
+scheduled tasks) by default. It survives navigation and behaves like the Chrome side panel.
+
+To use the in-page floating panel instead (fine for chatting, not for agent runs that navigate the current tab), set
+`arcPanelMode` to `"iframe"` in the extension's `chrome.storage.local`, e.g. from the service-worker console:
+`chrome.storage.local.set({ arcPanelMode: "iframe" })`. Set it to `"window"` (or remove it) to go back.
+
 ### The stale-manifest problem (patch loads but nothing happens)
 
 Arc does not reliably re-parse `manifest.json` when you press **Reload** on an unpacked extension (this was
@@ -179,6 +191,18 @@ register its own listeners as well, or every click toggles the panel twice (open
   panel and open it again. You can confirm the shim is active in the panel: open
   `chrome-extension://fcoeoabgfenejglbffodgkkbkcdhcgfn/sidepanel.html?mode=window&tabId=<tabId>` in a tab and inspect
   `document.documentElement.dataset.arcTabGroupsInstall` / `.arcTabGroups` (the shim mirrors its state there).
+
+**Panel only shows "Claude is active in this tab group" / "Open chat" on every tab:**
+- Fixed in this version. The extension's TabGroupManager reconciles its registry against `chrome.tabs.query({})` on every
+  initialize; the shim used to return native (ungrouped) results for plain queries, so reconcile deleted every registered
+  group, and the panel then saw its tab as a *secondary* member of an unregistered group. Plain queries now carry the
+  emulated `groupId`. Emulated ids are also clock-seeded and persisted so they never collide with stale registry entries
+  after an extension reload. After updating, reload the extension and reopen the panel.
+
+**`patch.sh` says the source path does not exist after you removed the extension from Arc:**
+- Arc deletes the Web Store copy under `~/Library/Application Support/Arc/User Data/Default/Extensions/<id>/` when the
+  extension is removed. Keep a vanilla copy somewhere (or reinstall from the store in Chrome/Arc) to re-patch later.
+  Re-running `patch.sh` against an already patched folder is safe: it leaves the loaders alone.
 
 **Login issues:**
 - Make sure you're logged into Claude in Chrome first

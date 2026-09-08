@@ -38,7 +38,24 @@
   console.log("[Arc TabGroups Shim] installing in-memory tab group emulation");
 
   var NONE = -1;
-  var nextGroupId = 900001;
+  // Group ids must never be reused. The extension's own group registry
+  // (mcpPermissions TabGroupManager) persists across extension reloads while
+  // storage.session (our state) is wiped, so a counter restarting at 900001
+  // would hand a new group the id of a stale registry entry and the panel
+  // would then treat the tab as a *secondary* tab of that old group ("Claude
+  // is active in this tab group"). Seed from the clock and also persist the
+  // counter in storage.local.
+  var COUNTER_KEY = "__arcTabGroupsNextId";
+  var nextGroupId = 900000000 + (Math.floor(Date.now() / 1000) % 900000000);
+  try {
+    chrome.storage.local.get(COUNTER_KEY, function (d) {
+      var saved = d && d[COUNTER_KEY];
+      if (typeof saved === "number" && saved > nextGroupId) nextGroupId = saved;
+    });
+  } catch (e) {}
+  function persistCounter() {
+    try { chrome.storage.local.set({ [COUNTER_KEY]: nextGroupId }); } catch (e) {}
+  }
   // groupId -> { title, color, collapsed, windowId, tabIds:Set<number> }
   var groups = new Map();
   // tabId -> groupId
@@ -70,7 +87,22 @@
     } catch (e) { return Promise.resolve(); }
   }
 
+  function mirrorRegistryForDebug() {
+    // Also expose the extension's own group registry (storage.local) for debugging.
+    try {
+      if (typeof document === "undefined" || !document.documentElement) return;
+      chrome.storage.local.get(null, function (all) {
+        try {
+          var out = {};
+          Object.keys(all || {}).forEach(function (k) { if (/group/i.test(k)) out[k] = all[k]; });
+          document.documentElement.dataset.arcRegistry = JSON.stringify(out);
+        } catch (e) {}
+      });
+    } catch (e) {}
+  }
+
   function mirrorForDebug() {
+    mirrorRegistryForDebug();
     // In document contexts (sidepanel.html) expose the emulated state on the
     // root element so it can be inspected without extension-API access.
     try {
@@ -144,7 +176,7 @@
     var windowId = opts.createProperties && opts.createProperties.windowId;
 
     if (gid == null || !groups.has(gid)) {
-      if (gid == null) gid = nextGroupId++;
+      if (gid == null) { gid = nextGroupId++; persistCounter(); }
       if (windowId == null && tabIds.length) {
         try { var t0 = await nativeGet(tabIds[0]); windowId = t0.windowId; } catch (e) {}
       }
@@ -196,7 +228,20 @@
         var res = await nativeQuery(clone);
         return res.filter(function (t) { return tabToGroup.get(t.id) === info.groupId; });
       }
-      return nativeQuery(info);
+      // Plain queries must also carry the emulated groupId: the extension's
+      // TabGroupManager.reconcileWithChrome() does chrome.tabs.query({}) and
+      // collects every tab's groupId to decide which registered groups still
+      // exist. Without the overlay every tab looks ungrouped, reconcile wipes
+      // the whole registry (including the tab that was just registered), and
+      // the panel then renders the "Claude is active in this tab group"
+      // secondary-tab screen instead of the chat.
+      var res2 = await nativeQuery(info);
+      return (res2 || []).map(function (t) {
+        var gid = tabToGroup.get(t.id);
+        if (gid != null) t.groupId = gid;
+        else if (t.groupId == null) t.groupId = NONE;
+        return t;
+      });
     })();
   }
 

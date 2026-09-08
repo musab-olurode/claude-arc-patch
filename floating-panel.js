@@ -91,9 +91,9 @@
     if (!iframe) {
       const { tabId, iframeAllowed } = await getTabInfo();
       if (!iframeAllowed) {
-        // The manifest Arc parsed does not expose sidepanel.html to web pages,
-        // so an iframe would be blocked. Ask the service worker for a popup
-        // window instead and keep the in-page shell hidden.
+        // Popup-window mode (default), or the manifest Arc parsed does not
+        // expose sidepanel.html to web pages so an iframe would be blocked.
+        // Ask the service worker for the window and keep the shell hidden.
         try {
           chrome.runtime.sendMessage({ type: "ARC_OPEN_PANEL_WINDOW", tabId }, () => void chrome.runtime.lastError);
         } catch (e) {}
